@@ -1,9 +1,9 @@
 use clap::{self, Parser};
 use std::{fs, path::Path, process};
 
-const SECOND: i32 = 1000;
-const MINUTE: i32 = SECOND * 60;
-const HOUR: i32 = MINUTE * 60;
+const SECOND: u32 = 1000;
+const MINUTE: u32 = SECOND * 60;
+const HOUR: u32 = MINUTE * 60;
 
 /// Adjust the timestamps in an SRT file
 #[derive(Parser)]
@@ -21,7 +21,10 @@ struct Arguments {
 fn main() {
     let args = Arguments::parse();
 
-    let adjustment = parse_time(&args.adjustment.replace('+', ""));
+    let mut adjustment = parse_time(&args.adjustment.replace(&['+', '-'], "")) as i32;
+    if args.adjustment.starts_with('-') {
+        adjustment *= -1;
+    }
 
     let path = Path::new(&args.file);
     let text = match fs::read_to_string(path) {
@@ -35,8 +38,8 @@ fn main() {
     let mut subtitles = parse_srt(&text);
 
     for subtitle in subtitles.iter_mut() {
-        subtitle.from += adjustment;
-        subtitle.to += adjustment;
+        subtitle.from += ((subtitle.from as i32) + adjustment) as u32;
+        subtitle.to += ((subtitle.to as i32) + adjustment) as u32;
     }
 
     let output = print_subtitles(&subtitles);
@@ -50,8 +53,8 @@ fn main() {
 
 struct Subtitle<'a> {
     number: &'a str,
-    from: i32, // millis
-    to: i32,   // millis
+    from: u32, // millis
+    to: u32,   // millis
     lines: Vec<&'a str>,
 }
 
@@ -95,7 +98,7 @@ fn parse_srt(text: &str) -> Vec<Subtitle> {
     subtitles
 }
 
-fn parse_time(text: &str) -> i32 {
+fn parse_time(text: &str) -> u32 {
     let mut number_strs: Vec<&str> = text.splitn(3, ':').collect();
     number_strs.reverse();
     let mut number_strs_iter = number_strs.iter();
@@ -104,14 +107,14 @@ fn parse_time(text: &str) -> i32 {
     let mut millis = 0;
     if let Some(seconds_str) = number_strs_iter.next() {
         let (seconds_str, millis_str) = seconds_str.split_once(',').unwrap_or((seconds_str, "0"));
-        seconds = match seconds_str.parse::<i32>() {
+        seconds = match seconds_str.parse::<u32>() {
             Ok(seconds) => seconds,
             Err(_) => {
                 eprintln!("Failed to parse {} as an integer", seconds_str);
                 process::exit(1);
             }
         };
-        millis = match millis_str.parse::<i32>() {
+        millis = match millis_str.parse::<u32>() {
             Ok(millis) => millis,
             Err(_) => {
                 eprintln!("Failed to parse {} as an integer", millis_str);
@@ -122,7 +125,7 @@ fn parse_time(text: &str) -> i32 {
 
     let mut minutes = 0;
     if let Some(minutes_str) = number_strs_iter.next() {
-        minutes = match minutes_str.parse::<i32>() {
+        minutes = match minutes_str.parse::<u32>() {
             Ok(minutes) => minutes,
             Err(_) => {
                 eprintln!("Failed to parse {} as an integer", minutes_str);
@@ -133,7 +136,7 @@ fn parse_time(text: &str) -> i32 {
 
     let mut hours = 0;
     if let Some(hours_str) = number_strs_iter.next() {
-        hours = match hours_str.parse::<i32>() {
+        hours = match hours_str.parse::<u32>() {
             Ok(hours) => hours,
             Err(_) => {
                 eprintln!("Failed to parse {} as an integer", hours_str);
@@ -169,9 +172,9 @@ fn print_subtitle(subtitle: &Subtitle) -> String {
     text
 }
 
-fn print_time(millis: i32) -> String {
+fn print_time(millis: u32) -> String {
     let hours = millis / HOUR;
-    let mut leftover = (millis - hours * HOUR).abs();
+    let mut leftover = millis - hours * HOUR;
     let minutes = leftover / MINUTE;
     leftover -= minutes * MINUTE;
     let seconds = leftover / SECOND;
