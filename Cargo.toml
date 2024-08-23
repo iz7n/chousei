@@ -4,4 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+ariadne = "0.4.1"
 clap = { version = "4.5.16", features = ["derive"] }
+unicode-width = "0.1.13"

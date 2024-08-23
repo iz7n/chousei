@@ -1,9 +1,12 @@
+use ariadne::{Color, Label, Report, ReportKind, Source};
 use clap::{self, Parser};
-use std::{fs, path::Path, process};
+use std::{fs, ops::Range, path::Path, process};
+use unicode_width::UnicodeWidthStr;
 
 const SECOND: u32 = 1000;
 const MINUTE: u32 = SECOND * 60;
 const HOUR: u32 = MINUTE * 60;
+const ARROW_SEPARATOR: &str = " --> ";
 
 /// Adjust the timestamps in an SRT file
 #[derive(Parser)]
@@ -18,10 +21,16 @@ struct Arguments {
     output: Option<String>,
 }
 
-fn main() -> Result<(), String> {
+fn main() {
     let args = Arguments::parse();
 
-    let adjustment = parse_time(&args.adjustment.replace(&['+', '-'], ""))?;
+    let adjustment = match parse_time(&args.adjustment.replace(&['+', '-'], ""), 0) {
+        Ok(adjustment) => adjustment,
+        Err(err) => {
+            eprintln!("{}", err.message);
+            process::exit(1);
+        }
+    };
     let neg = args.adjustment.starts_with('-');
 
     let path = Path::new(&args.file);
@@ -32,8 +41,21 @@ fn main() -> Result<(), String> {
             process::exit(1);
         }
     };
+    let text = &text.replace(&['\r', '\u{feff}'], "");
 
-    let mut subtitles = parse_srt(&text)?;
+    let mut subtitles = parse_srt(&text).unwrap_or_else(|error| {
+        Report::build(ReportKind::Error, (), error.range.start)
+            .with_message(&error.message)
+            .with_label(
+                Label::new(error.range)
+                    .with_color(Color::Red)
+                    .with_message(&error.reason),
+            )
+            .finish()
+            .eprint(Source::from(&text))
+            .unwrap();
+        process::exit(1);
+    });
 
     for subtitle in subtitles.iter_mut() {
         if neg {
@@ -52,39 +74,80 @@ fn main() -> Result<(), String> {
         eprintln!("Failed to write the output file {}", path.display());
         process::exit(1);
     }
-
-    Ok(())
 }
 
 struct Subtitle<'a> {
-    number: &'a str,
+    number: u32,
     from: u32, // millis
     to: u32,   // millis
     lines: Vec<&'a str>,
 }
 
-fn parse_srt(text: &str) -> Result<Vec<Subtitle>, String> {
+struct ParseError {
+    message: String,
+    reason: String,
+    range: Range<usize>,
+}
+
+fn parse_srt(text: &str) -> Result<Vec<Subtitle>, ParseError> {
     let mut subtitles: Vec<Subtitle> = vec![];
     let mut lines_iter = text.lines();
+    let mut index = 0usize;
     while let Some(number_line) = lines_iter.next() {
-        let time_line = match lines_iter.next() {
-            Some(time_line) => time_line,
-            None => return Err(format!("Failed to find time line for line {}", number_line)),
-        };
-        let (from_text, to_text) = match time_line.split_once(" --> ") {
-            Some((from_text, to_text)) => (from_text, to_text),
-            None => {
-                return Err(format!(
-                    "Time line for line {} did not contain ' --> '",
-                    number_line
-                ))
+        let number = match number_line.parse::<u32>() {
+            Ok(number) => number,
+            Err(_) => {
+                return Err(ParseError {
+                    message: format!("Failed to parse {:?} as an integer", number_line),
+                    reason: "Invalid subtitle number".into(),
+                    range: Range {
+                        start: index,
+                        end: index + number_line.width(),
+                    },
+                });
             }
         };
-        let from = parse_time(from_text)?;
-        let to = parse_time(to_text)?;
+        index += number_line.width() + 1;
+
+        let time_line = match lines_iter.next() {
+            Some(time_line) => time_line,
+            None => {
+                return Err(ParseError {
+                    message: format!("Expected to find time line for subtitle {}", number_line),
+                    reason: "Missing time line".into(),
+                    range: Range {
+                        start: index,
+                        end: index,
+                    },
+                })
+            }
+        };
+
+        let (from_text, to_text) = match time_line.split_once(ARROW_SEPARATOR) {
+            Some((from_text, to_text)) => (from_text, to_text),
+            None => {
+                return Err(ParseError {
+                    message: format!(
+                        "Expected to find arrow in time line for subtitle {}",
+                        number_line
+                    ),
+                    reason: format!("Missing '{}'", ARROW_SEPARATOR),
+                    range: Range {
+                        start: index,
+                        end: index + time_line.width(),
+                    },
+                })
+            }
+        };
+
+        let from = parse_time(from_text, index)?;
+        let to = parse_time(to_text, index + from_text.width() + ARROW_SEPARATOR.width())?;
+
+        index += time_line.len() + 1;
 
         let mut lines: Vec<&str> = vec![];
         while let Some(line) = lines_iter.next() {
+            index += line.width() + 1;
             if line.is_empty() {
                 break;
             }
@@ -92,7 +155,7 @@ fn parse_srt(text: &str) -> Result<Vec<Subtitle>, String> {
         }
 
         subtitles.push(Subtitle {
-            number: number_line,
+            number,
             from,
             to,
             lines,
@@ -102,7 +165,7 @@ fn parse_srt(text: &str) -> Result<Vec<Subtitle>, String> {
     Ok(subtitles)
 }
 
-fn parse_time(text: &str) -> Result<u32, String> {
+fn parse_time(text: &str, index: usize) -> Result<u32, ParseError> {
     let mut number_strs: Vec<&str> = text.splitn(3, ':').collect();
     number_strs.reverse();
     let mut number_strs_iter = number_strs.iter();
@@ -113,11 +176,29 @@ fn parse_time(text: &str) -> Result<u32, String> {
         let (seconds_str, millis_str) = seconds_str.split_once(',').unwrap_or((seconds_str, "0"));
         seconds = match seconds_str.parse::<u32>() {
             Ok(seconds) => seconds,
-            Err(_) => return Err(format!("Failed to parse {} as an integer", seconds_str)),
+            Err(_) => {
+                return Err(ParseError {
+                    message: format!("Failed to parse {} as an integer", seconds_str),
+                    reason: "Invalid seconds".into(),
+                    range: Range {
+                        start: index,
+                        end: index + text.width(),
+                    },
+                })
+            }
         };
         millis = match millis_str.parse::<u32>() {
             Ok(millis) => millis,
-            Err(_) => return Err(format!("Failed to parse {} as an integer", millis_str)),
+            Err(_) => {
+                return Err(ParseError {
+                    message: format!("Failed to parse {} as an integer", millis_str),
+                    reason: "Invalid millis".into(),
+                    range: Range {
+                        start: index,
+                        end: index + text.width(),
+                    },
+                })
+            }
         }
     }
 
@@ -125,7 +206,16 @@ fn parse_time(text: &str) -> Result<u32, String> {
     if let Some(minutes_str) = number_strs_iter.next() {
         minutes = match minutes_str.parse::<u32>() {
             Ok(minutes) => minutes,
-            Err(_) => return Err(format!("Failed to parse {} as an integer", minutes_str)),
+            Err(_) => {
+                return Err(ParseError {
+                    message: format!("Failed to parse {} as an integer", minutes_str),
+                    reason: "Invalid minutes".into(),
+                    range: Range {
+                        start: index,
+                        end: index + text.width(),
+                    },
+                })
+            }
         }
     }
 
@@ -133,7 +223,16 @@ fn parse_time(text: &str) -> Result<u32, String> {
     if let Some(hours_str) = number_strs_iter.next() {
         hours = match hours_str.parse::<u32>() {
             Ok(hours) => hours,
-            Err(_) => return Err(format!("Failed to parse {} as an integer", hours_str)),
+            Err(_) => {
+                return Err(ParseError {
+                    message: format!("Failed to parse {} as an integer", hours_str),
+                    reason: "Invalid hours".into(),
+                    range: Range {
+                        start: index,
+                        end: index + text.width(),
+                    },
+                })
+            }
         }
     }
 
