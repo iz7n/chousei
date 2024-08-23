@@ -18,13 +18,11 @@ struct Arguments {
     output: Option<String>,
 }
 
-fn main() {
+fn main() -> Result<(), String> {
     let args = Arguments::parse();
 
-    let mut adjustment = parse_time(&args.adjustment.replace(&['+', '-'], "")) as i32;
-    if args.adjustment.starts_with('-') {
-        adjustment *= -1;
-    }
+    let adjustment = parse_time(&args.adjustment.replace(&['+', '-'], ""))?;
+    let neg = args.adjustment.starts_with('-');
 
     let path = Path::new(&args.file);
     let text = match fs::read_to_string(path) {
@@ -35,11 +33,16 @@ fn main() {
         }
     };
 
-    let mut subtitles = parse_srt(&text);
+    let mut subtitles = parse_srt(&text)?;
 
     for subtitle in subtitles.iter_mut() {
-        subtitle.from += ((subtitle.from as i32) + adjustment) as u32;
-        subtitle.to += ((subtitle.to as i32) + adjustment) as u32;
+        if neg {
+            subtitle.from -= adjustment;
+            subtitle.to -= adjustment;
+        } else {
+            subtitle.from += adjustment;
+            subtitle.to += adjustment;
+        }
     }
 
     let output = print_subtitles(&subtitles);
@@ -49,6 +52,8 @@ fn main() {
         eprintln!("Failed to write the output file {}", path.display());
         process::exit(1);
     }
+
+    Ok(())
 }
 
 struct Subtitle<'a> {
@@ -58,26 +63,25 @@ struct Subtitle<'a> {
     lines: Vec<&'a str>,
 }
 
-fn parse_srt(text: &str) -> Vec<Subtitle> {
+fn parse_srt(text: &str) -> Result<Vec<Subtitle>, String> {
     let mut subtitles: Vec<Subtitle> = vec![];
     let mut lines_iter = text.lines();
     while let Some(number_line) = lines_iter.next() {
         let time_line = match lines_iter.next() {
             Some(time_line) => time_line,
-            None => {
-                eprintln!("Failed to find time line for line {}", number_line);
-                process::exit(1);
-            }
+            None => return Err(format!("Failed to find time line for line {}", number_line)),
         };
         let (from_text, to_text) = match time_line.split_once(" --> ") {
             Some((from_text, to_text)) => (from_text, to_text),
             None => {
-                eprintln!("Time line for line {} did not contain ' --> '", number_line);
-                process::exit(1);
+                return Err(format!(
+                    "Time line for line {} did not contain ' --> '",
+                    number_line
+                ))
             }
         };
-        let from = parse_time(from_text);
-        let to = parse_time(to_text);
+        let from = parse_time(from_text)?;
+        let to = parse_time(to_text)?;
 
         let mut lines: Vec<&str> = vec![];
         while let Some(line) = lines_iter.next() {
@@ -95,10 +99,10 @@ fn parse_srt(text: &str) -> Vec<Subtitle> {
         })
     }
 
-    subtitles
+    Ok(subtitles)
 }
 
-fn parse_time(text: &str) -> u32 {
+fn parse_time(text: &str) -> Result<u32, String> {
     let mut number_strs: Vec<&str> = text.splitn(3, ':').collect();
     number_strs.reverse();
     let mut number_strs_iter = number_strs.iter();
@@ -109,17 +113,11 @@ fn parse_time(text: &str) -> u32 {
         let (seconds_str, millis_str) = seconds_str.split_once(',').unwrap_or((seconds_str, "0"));
         seconds = match seconds_str.parse::<u32>() {
             Ok(seconds) => seconds,
-            Err(_) => {
-                eprintln!("Failed to parse {} as an integer", seconds_str);
-                process::exit(1);
-            }
+            Err(_) => return Err(format!("Failed to parse {} as an integer", seconds_str)),
         };
         millis = match millis_str.parse::<u32>() {
             Ok(millis) => millis,
-            Err(_) => {
-                eprintln!("Failed to parse {} as an integer", millis_str);
-                process::exit(1);
-            }
+            Err(_) => return Err(format!("Failed to parse {} as an integer", millis_str)),
         }
     }
 
@@ -127,10 +125,7 @@ fn parse_time(text: &str) -> u32 {
     if let Some(minutes_str) = number_strs_iter.next() {
         minutes = match minutes_str.parse::<u32>() {
             Ok(minutes) => minutes,
-            Err(_) => {
-                eprintln!("Failed to parse {} as an integer", minutes_str);
-                process::exit(1);
-            }
+            Err(_) => return Err(format!("Failed to parse {} as an integer", minutes_str)),
         }
     }
 
@@ -138,14 +133,11 @@ fn parse_time(text: &str) -> u32 {
     if let Some(hours_str) = number_strs_iter.next() {
         hours = match hours_str.parse::<u32>() {
             Ok(hours) => hours,
-            Err(_) => {
-                eprintln!("Failed to parse {} as an integer", hours_str);
-                process::exit(1);
-            }
+            Err(_) => return Err(format!("Failed to parse {} as an integer", hours_str)),
         }
     }
 
-    hours * HOUR + minutes * MINUTE + seconds * SECOND + millis
+    Ok(hours * HOUR + minutes * MINUTE + seconds * SECOND + millis)
 }
 
 fn print_subtitles(subtitles: &[Subtitle]) -> String {
