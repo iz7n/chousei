@@ -1,5 +1,8 @@
-use ariadne::{Color, Label, Report, ReportKind, Source};
 use clap::{self, Parser};
+use codespan_reporting::diagnostic::{Diagnostic, Label};
+use codespan_reporting::files::SimpleFile;
+use codespan_reporting::term;
+use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
 use std::{fs, ops::Range, path::Path, process};
 use unicode_width::UnicodeWidthStr;
 
@@ -44,16 +47,18 @@ fn main() {
     let text = &text.replace(&['\r', '\u{feff}'], "");
 
     let mut subtitles = parse_srt(&text).unwrap_or_else(|error| {
-        Report::build(ReportKind::Error, (), error.range.start)
-            .with_message(&error.message)
-            .with_label(
-                Label::new(error.range)
-                    .with_color(Color::Red)
-                    .with_message(&error.reason),
-            )
-            .finish()
-            .eprint(Source::from(&text))
-            .unwrap();
+        let file = SimpleFile::new(path.file_name().unwrap().to_str().unwrap(), text);
+
+        let diagnostic = Diagnostic::error()
+            .with_message(error.message)
+            .with_labels(vec![
+                Label::primary((), error.range).with_message(error.reason)
+            ]);
+
+        let writer = StandardStream::stderr(ColorChoice::Always);
+        let config = codespan_reporting::term::Config::default();
+
+        term::emit(&mut writer.lock(), &config, &file, &diagnostic).unwrap();
         process::exit(1);
     });
 
