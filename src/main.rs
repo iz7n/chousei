@@ -3,7 +3,10 @@ use codespan_reporting::diagnostic::{Diagnostic, Label};
 use codespan_reporting::files::SimpleFile;
 use codespan_reporting::term;
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
-use std::{fs, ops::Range, path::Path, process};
+use std::borrow::Cow;
+use std::path::PathBuf;
+use std::{fs, ops::Range, process};
+use unicode_normalization::UnicodeNormalization;
 use unicode_width::UnicodeWidthStr;
 
 const SECOND: u32 = 1000;
@@ -16,27 +19,38 @@ const ARROW_SEPARATOR: &str = " --> ";
 #[command(about)]
 struct Arguments {
     /// The SRT file to adjust
-    file: String,
-    /// The change in time
-    adjustment: String,
+    file: PathBuf,
+    /// The change in time (example: "-00:01" will subtract 1 second)
+    #[arg(short, long, value_name = "TIME")]
+    adjustment: Option<String>,
     /// The output file (default: same as input file)
-    #[arg(short, long)]
-    output: Option<String>,
+    #[arg(short, long, value_name = "FILE")]
+    output: Option<PathBuf>,
+    /// Normalize each subtitle using NFKC
+    /// This will basically make all half-width characters full-width (ｱ -> ア)
+    #[arg(short, long, verbatim_doc_comment)]
+    normalize: bool,
 }
 
 fn main() {
     let args = Arguments::parse();
 
-    let adjustment = match parse_time(&args.adjustment.replace(&['+', '-'], ""), 0) {
-        Ok(adjustment) => adjustment,
-        Err(err) => {
-            eprintln!("{}", err.message);
-            process::exit(1);
+    let (adjustment, neg) = match args.adjustment {
+        Some(adjustment_str) => {
+            let adjustment = match parse_time(&adjustment_str.replace(&['+', '-'], ""), 0) {
+                Ok(adjustment) => adjustment,
+                Err(err) => {
+                    eprintln!("{}", err.message);
+                    process::exit(1);
+                }
+            };
+            let neg = adjustment_str.starts_with('-');
+            (adjustment, neg)
         }
+        None => (0, false),
     };
-    let neg = args.adjustment.starts_with('-');
 
-    let path = Path::new(&args.file);
+    let path = &args.file;
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(_) => {
@@ -70,6 +84,14 @@ fn main() {
             subtitle.from += adjustment;
             subtitle.to += adjustment;
         }
+
+        if args.normalize {
+            subtitle.lines = subtitle
+                .lines
+                .iter()
+                .map(|line| line.nfkc().collect::<Cow<str>>())
+                .collect();
+        }
     }
 
     let output = print_subtitles(&subtitles);
@@ -85,7 +107,7 @@ struct Subtitle<'a> {
     number: u32,
     from: u32, // millis
     to: u32,   // millis
-    lines: Vec<&'a str>,
+    lines: Vec<Cow<'a, str>>,
 }
 
 struct ParseError {
@@ -150,13 +172,13 @@ fn parse_srt(text: &str) -> Result<Vec<Subtitle>, ParseError> {
 
         index += time_line.len() + 1;
 
-        let mut lines: Vec<&str> = vec![];
+        let mut lines: Vec<Cow<str>> = vec![];
         while let Some(line) = lines_iter.next() {
             index += line.width() + 1;
             if line.is_empty() {
                 break;
             }
-            lines.push(line);
+            lines.push(Cow::Borrowed(line));
         }
 
         subtitles.push(Subtitle {
@@ -251,6 +273,7 @@ fn print_subtitles(subtitles: &[Subtitle]) -> String {
         text.push_str(&string);
         text.push('\n');
     }
+    text.pop();
     text
 }
 
