@@ -3,6 +3,8 @@ use codespan_reporting::diagnostic::{Diagnostic, Label};
 use codespan_reporting::files::SimpleFile;
 use codespan_reporting::term;
 use codespan_reporting::term::termcolor::{ColorChoice, StandardStream};
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::borrow::Cow;
 use std::path::PathBuf;
 use std::{fs, ops::Range, process};
@@ -26,6 +28,9 @@ struct Arguments {
     /// The output file (default: same as input file)
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
+    /// Trim ASS subtitle style overrides (like {\an8})
+    #[arg(short, long)]
+    trim_styles: bool,
     /// Normalize each subtitle using NFKC
     /// This will basically make all half-width characters full-width (ｱ -> ア)
     #[arg(short, long, verbatim_doc_comment)]
@@ -85,12 +90,25 @@ fn main() {
             subtitle.to += adjustment;
         }
 
+        if args.trim_styles {
+            static ASS_STYLE_OVERRIDE_RE: Lazy<Regex> =
+                Lazy::new(|| Regex::new(r"\{\\.+}").unwrap());
+
+            let trimmed_lines: Vec<Cow<str>> = subtitle
+                .lines
+                .iter()
+                .map(|line| Cow::from(ASS_STYLE_OVERRIDE_RE.replace_all(line, "").to_string()))
+                .collect();
+            subtitle.lines = trimmed_lines;
+        }
+
         if args.normalize {
-            subtitle.lines = subtitle
+            let normalized_lines = subtitle
                 .lines
                 .iter()
                 .map(|line| line.nfkc().collect::<Cow<str>>())
                 .collect();
+            subtitle.lines = normalized_lines;
         }
     }
 
